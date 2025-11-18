@@ -1938,3 +1938,12 @@ func TraceStack(gp *G, tab *TraceStackTable) {
 var DebugDecorateMappings = &debug.decoratemappings
 
 func SetVMANameSupported() bool { return setVMANameSupported() }
+
+// Scheduler interface exports for testing
+type SchedulerForTest = Scheduler
+
+var GetSchedulerForTest = getScheduler
+var SetSchedulerForTest = setScheduler
+var NewPrioritySchedulerForTest = newPriorityScheduler
+var NewFIFOSchedulerForTest = newFIFOScheduler
+var NewWorkStealingSchedulerForTest = newWorkStealingScheduler
