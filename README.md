@@ -17,7 +17,7 @@ A Go library and CLI tool for instrumenting Go source code with memory read/writ
 
 ```bash
 # Install
-go get github.com/amirkhaki/moriarty
+go install github.com/amirkhaki/moriarty@latest
 
 # Instrument a file
 moriarty input.go > instrumented.go
