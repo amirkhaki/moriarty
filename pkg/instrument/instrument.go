@@ -39,6 +39,10 @@ type Config struct {
 
 	// GoroutineExitFunc is the name of the goroutine exit hook
 	GoroutineExitFunc string
+
+	// Importer is used for resolving imports during type checking
+	// If nil, importer.Default() is used
+	Importer types.Importer
 }
 
 // DefaultConfig returns a Config with default settings
@@ -58,8 +62,10 @@ func DefaultConfig() *Config {
 
 // Instrumenter handles the instrumentation of Go source code
 type Instrumenter struct {
-	config   *Config
-	typeInfo *types.Info
+	config          *Config
+	typeInfo        *types.Info
+	instrumented    bool // tracks if any instrumentation was added to current file
+	anyInstrumented bool // tracks if any file had instrumentation
 }
 
 // NewInstrumenter creates a new Instrumenter with the given config
@@ -89,6 +95,11 @@ func generateRuntimeAlias(importPath string) string {
 	return "__moriarty_" + hashStr
 }
 
+// WasInstrumented returns true if any instrumentation was added during the last operation
+func (instr *Instrumenter) WasInstrumented() bool {
+	return instr.anyInstrumented
+}
+
 // InstrumentFile instruments a single Go source file
 func (instr *Instrumenter) InstrumentFile(fset *token.FileSet, filename string, src interface{}) (*ast.File, error) {
 	// Parse the file
@@ -100,26 +111,87 @@ func (instr *Instrumenter) InstrumentFile(fset *token.FileSet, filename string, 
 	return instr.InstrumentAST(fset, f)
 }
 
-// InstrumentAST instruments an already-parsed AST
-func (instr *Instrumenter) InstrumentAST(fset *token.FileSet, f *ast.File) (*ast.File, error) {
-	// Perform type checking
-	conf := types.Config{Importer: importer.Default()}
+// InstrumentFiles instruments multiple Go source files together (for proper type checking)
+func (instr *Instrumenter) InstrumentFiles(fset *token.FileSet, filenames []string) ([]*ast.File, error) {
+	// Parse all files
+	files := make([]*ast.File, len(filenames))
+	for i, filename := range filenames {
+		f, err := parser.ParseFile(fset, filename, nil, parser.ParseComments)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse %s: %w", filename, err)
+		}
+		files[i] = f
+	}
+
+	return instr.InstrumentASTs(fset, files)
+}
+
+// InstrumentASTs instruments multiple already-parsed ASTs together
+func (instr *Instrumenter) InstrumentASTs(fset *token.FileSet, files []*ast.File) ([]*ast.File, error) {
+	// Reset the any-instrumented flag for this batch
+	instr.anyInstrumented = false
+	
+	// Perform type checking on all files together
+	imp := instr.config.Importer
+	if imp == nil {
+		imp = importer.Default()
+	}
+	conf := types.Config{Importer: imp}
 	instr.typeInfo = &types.Info{
 		Types: make(map[ast.Expr]types.TypeAndValue),
 		Defs:  make(map[*ast.Ident]types.Object),
 		Uses:  make(map[*ast.Ident]types.Object),
 	}
-	_, _ = conf.Check("", fset, []*ast.File{f}, instr.typeInfo)
-	// Ignore type errors - we still want to instrument even if there are type errors
+	_, typeErr := conf.Check("", fset, files, instr.typeInfo)
+	// If type checking completely failed (no useful type info), disable it
+	if typeErr != nil && len(instr.typeInfo.Defs) == 0 && len(instr.typeInfo.Uses) == 0 {
+		instr.typeInfo = nil
+	}
+	// Otherwise, we can use partial type info even if there were errors
+
+	// Instrument each file
+	for _, f := range files {
+		instr.instrumentSingleAST(fset, f)
+	}
+
+	return files, nil
+}
+
+// InstrumentAST instruments an already-parsed AST
+func (instr *Instrumenter) InstrumentAST(fset *token.FileSet, f *ast.File) (*ast.File, error) {
+	// Perform type checking on single file
+	imp := instr.config.Importer
+	if imp == nil {
+		imp = importer.Default()
+	}
+	conf := types.Config{Importer: imp}
+	instr.typeInfo = &types.Info{
+		Types: make(map[ast.Expr]types.TypeAndValue),
+		Defs:  make(map[*ast.Ident]types.Object),
+		Uses:  make(map[*ast.Ident]types.Object),
+	}
+	_, typeErr := conf.Check("", fset, []*ast.File{f}, instr.typeInfo)
+	// If type checking completely failed (no useful type info), disable it
+	if typeErr != nil && len(instr.typeInfo.Defs) == 0 && len(instr.typeInfo.Uses) == 0 {
+		instr.typeInfo = nil
+	}
+	// Otherwise, we can use partial type info even if there were errors
+
+	instr.instrumentSingleAST(fset, f)
+	return f, nil
+}
+
+// instrumentSingleAST performs the actual instrumentation on a single file
+// (assumes typeInfo is already populated)
+func (instr *Instrumenter) instrumentSingleAST(fset *token.FileSet, f *ast.File) {
 
 	// Apply import rewrites
 	for k, v := range instr.config.ImportRewrites {
 		astutil.RewriteImport(fset, f, k, v)
 	}
 
-	// Add required imports for instrumentation
-	astutil.AddImport(fset, f, "unsafe")
-	astutil.AddNamedImport(fset, f, instr.config.RuntimeAlias, instr.config.BaseRuntimeAddress)
+	// Reset instrumentation flag
+	instr.instrumented = false
 
 	// Pass 0: Lower control flow structures (if/for with init)
 	astutil.Apply(f, nil, func(c *astutil.Cursor) bool {
@@ -165,7 +237,12 @@ func (instr *Instrumenter) InstrumentAST(fset *token.FileSet, f *ast.File) (*ast
 		return true
 	})
 
-	return f, nil
+	// Only add imports if instrumentation was actually added
+	if instr.instrumented {
+		instr.anyInstrumented = true
+		astutil.AddImport(fset, f, "unsafe")
+		astutil.AddNamedImport(fset, f, instr.config.RuntimeAlias, instr.config.BaseRuntimeAddress)
+	}
 }
 
 // WriteInstrumented writes the instrumented AST to the given writer
@@ -174,6 +251,7 @@ func WriteInstrumented(w io.Writer, fset *token.FileSet, f *ast.File) error {
 }
 
 func (instr *Instrumenter) makeMemReadCall(expr ast.Expr) *ast.CallExpr {
+	instr.instrumented = true
 	return &ast.CallExpr{
 		Fun: &ast.SelectorExpr{
 			X:   &ast.Ident{Name: instr.config.RuntimeAlias},
@@ -194,6 +272,7 @@ func (instr *Instrumenter) makeMemReadCall(expr ast.Expr) *ast.CallExpr {
 }
 
 func (instr *Instrumenter) makeMemWriteCall(expr ast.Expr) *ast.CallExpr {
+	instr.instrumented = true
 	return &ast.CallExpr{
 		Fun: &ast.SelectorExpr{
 			X:   &ast.Ident{Name: instr.config.RuntimeAlias},
@@ -227,6 +306,8 @@ func (instr *Instrumenter) instrumentGoStmt(c *astutil.Cursor, stmt *ast.GoStmt)
 	//     runtime.GoroutineExit()
 	//   })
 	// }
+
+	instr.instrumented = true
 
 	callExpr := stmt.Call
 
@@ -445,13 +526,17 @@ func (instr *Instrumenter) instrumentAssignment(c *astutil.Cursor, stmt *ast.Ass
 		// vs being defined for the first time
 		if stmt.Tok == token.DEFINE {
 			if ident, ok := lhs.(*ast.Ident); ok {
-				// If Defs[ident] is nil, it means this variable already existed
-				// in this scope and is being reassigned (redeclaration)
+				// Only instrument if we have type info AND it's a redeclaration
+				// Defs[ident] == nil means the variable was NOT newly defined here (redeclaration)
+				// Defs[ident] != nil means this is the first definition (new variable)
 				if instr.typeInfo != nil && instr.typeInfo.Defs[ident] == nil {
 					// This is a redeclaration - instrument the write
 					instr.collectWrites(lhs, &writeStmts)
 				}
-				// If Defs[ident] is non-nil, it's a new variable - no instrumentation needed
+				// Otherwise it's a new variable or we can't tell - no instrumentation
+			} else {
+				// LHS is not a simple identifier (e.g., a.b := ...), instrument it
+				instr.collectWrites(lhs, &writeStmts)
 			}
 		} else {
 			// Regular assignment or op-assignment - always instrument
@@ -556,9 +641,9 @@ func (instr *Instrumenter) collectReads(expr ast.Expr, stmts *[]ast.Stmt) {
 		// Skip package identifiers and type names
 		if instr.typeInfo != nil {
 			if obj := instr.typeInfo.Uses[e]; obj != nil {
-				// Skip if it's a package name or type name
+				// Skip if it's a package name, type name, constant, nil, or function
 				switch obj.(type) {
-				case *types.PkgName, *types.TypeName, *types.Const, *types.Nil:
+				case *types.PkgName, *types.TypeName, *types.Const, *types.Nil, *types.Func:
 					return
 				}
 			}
@@ -573,6 +658,24 @@ func (instr *Instrumenter) collectReads(expr ast.Expr, stmts *[]ast.Stmt) {
 				case *types.Const, *types.PkgName, *types.TypeName, *types.Nil:
 					return
 				}
+			} else {
+				// No object found for selector - check if X is an identifier (likely package)
+				if ident, ok := e.X.(*ast.Ident); ok {
+					if xObj := instr.typeInfo.Uses[ident]; xObj != nil {
+						if _, isPkg := xObj.(*types.PkgName); isPkg {
+							return
+						}
+					} else {
+						// X not in Uses either - assume it's a package
+						return
+					}
+				}
+			}
+		} else {
+			// No type info - be conservative
+			// If X is a simple identifier, it's likely a package name, skip it
+			if _, isIdent := e.X.(*ast.Ident); isIdent {
+				return
 			}
 		}
 		instr.collectReads(e.X, stmts)
@@ -616,8 +719,30 @@ func (instr *Instrumenter) collectReads(expr ast.Expr, stmts *[]ast.Stmt) {
 		case *ast.Ident:
 			// Simple function call - don't instrument the function name
 		case *ast.SelectorExpr:
-			// Package.Function or obj.Method - only instrument the receiver if it's a variable
-			instr.collectReads(fun.X, stmts)
+			// Package.Function or obj.Method - check if X is a package
+			if instr.typeInfo != nil {
+				if ident, ok := fun.X.(*ast.Ident); ok {
+					if obj := instr.typeInfo.Uses[ident]; obj != nil {
+						if _, isPkg := obj.(*types.PkgName); isPkg {
+							// It's a package selector - don't instrument
+							break
+						}
+						// Not a package, it's a real object - instrument it
+						instr.collectReads(fun.X, stmts)
+					}
+					// obj is nil - unknown, assume it's a package (conservative)
+				} else {
+					// X is not a simple ident (e.g., obj.field.method())
+					instr.collectReads(fun.X, stmts)
+				}
+			} else {
+				// No type info - be conservative
+				// If X is a simple identifier, it's likely a package, skip it
+				if _, isIdent := fun.X.(*ast.Ident); !isIdent {
+					// Not a simple ident, could be obj.method()
+					instr.collectReads(fun.X, stmts)
+				}
+			}
 		default:
 			// Function expression - instrument it
 			instr.collectReads(e.Fun, stmts)

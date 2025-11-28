@@ -26,7 +26,9 @@ Moriarty is a Go source-to-source instrumentation tool that adds race detection 
 - **Comprehensive coverage**: Instruments variables, pointers, structs, arrays, slices, maps, and channels
 - **Goroutine lifecycle tracking**: Wraps goroutine spawns with enter/exit hooks
 - **Smart filtering**: Skips constants, package names, built-ins, and address-of operations
-- **Two-pass design**: Separates memory instrumentation from goroutine instrumentation
+- **Three-pass design**: Control flow lowering, memory instrumentation, goroutine instrumentation
+- **Go toolchain integration**: Works with `go build -toolexec` for seamless compilation
+- **Smart import management**: Only adds runtime imports when actually used
 
 ---
 
@@ -51,18 +53,59 @@ moriarty/
 ### Processing Pipeline
 
 ```
-Source Code (.go)
+Source Code (.go files)
       ↓
-[1. Parse] → AST
+[1. Parse] → AST (multiple files together for a package)
       ↓
-[2. Type Check] → Type Information
+[2. Type Check] → Type Information (with importcfg support)
       ↓
-[3. First Pass] → Memory Instrumentation
+[3. Pass 0: Control Flow Lowering] → Simplify control structures
       ↓
-[4. Second Pass] → Goroutine Instrumentation
+[4. Pass 1: Memory Instrumentation] → Add MemRead/MemWrite
       ↓
-[5. Output] → Instrumented Code
+[5. Pass 2: Goroutine Instrumentation] → Wrap go statements
+      ↓
+[6. Add Imports] → Only if instrumentation was added
+      ↓
+[7. Output] → Instrumented Code (to temp directory)
 ```
+
+### Multi-File Support and Go Toolchain Integration
+
+**Toolexec Mode (`-toolexec`)**
+
+Moriarty integrates with the Go toolchain via the `-toolexec` flag:
+
+```bash
+go build -toolexec /path/to/moriarty
+```
+
+When invoked this way:
+1. **Intercepts `compile` commands**: Moriarty wraps the Go compiler
+2. **Instruments before compilation**: Processes all `.go` files in the package
+3. **Preserves build artifacts**: Uses Go's temp directory (`WORK` env var)
+4. **Type checking with importcfg**: Loads dependency type information from `-importcfg`
+5. **Skips GOROOT files**: Doesn't instrument standard library code
+
+**Multi-file type checking**:
+- When using `-toolexec`, the compiler passes multiple `.go` files together
+- Moriarty type-checks them as a package to support cross-file references
+- Example: `NewCounter()` from `types.go` used in `main.go`
+
+**Implementation modes:**
+
+```go
+// Single file mode (standalone CLI usage)
+func (instr *Instrumenter) InstrumentFile(fset, filename, src) (*ast.File, error)
+
+// Multi-file mode (used by -toolexec)
+func (instr *Instrumenter) InstrumentFiles(fset, filenames) ([]*ast.File, error)
+```
+
+**Import configuration**:
+- Uses `-importcfg` to resolve package dependencies
+- Loads type information for imported packages
+- Ensures complete type resolution for instrumentation decisions
 
 ---
 
@@ -305,18 +348,34 @@ go worker(x, y)
 4. **Spawn wrapper**: Enables custom scheduling or additional tracking
 5. **Isolation**: New goroutine code is wrapped in a block to avoid scope issues
 
-### Import Alias Generation
+### Import Management
+
+**Alias Generation**
 
 To avoid conflicts with Go's built-in `runtime` package and user imports, we generate a deterministic alias:
 
 ```go
 import __moriarty_5decea860786e867 "github.com/amirkhaki/moriarty/pkg/runtime"
+import "unsafe"  // Only added when needed
 ```
 
 The hash `5decea860786e867` is SHA256 of the package path, ensuring:
 - No conflicts with user code
 - Deterministic (same input → same alias)
 - Recognizable prefix for debugging
+
+**Smart Import Addition**
+
+Imports are only added when necessary:
+- `moriarty/pkg/runtime`: Added only if memory or goroutine instrumentation was performed
+- `unsafe`: Added only if any instrumentation occurred
+- Prevents "imported but not used" compile errors
+- Checks if instrumentation actually modified the AST before adding imports
+
+**Why this matters**:
+- Some files may have no instrumentable code (e.g., only type definitions)
+- Adding unused imports would cause compilation errors
+- Reduces clutter in instrumented output
 
 ---
 
@@ -447,6 +506,50 @@ for i := 0; i < 10; i++ { x++ }
 // If there was an outer 'i', it's not affected!
 ```
 
+### 5. GOROOT Filtering
+
+**Problem**: Instrumenting standard library files causes issues:
+- Cannot modify standard library code
+- Type information may be incomplete for stdlib
+- Unnecessary overhead
+
+**Solution**: Skip files in GOROOT.
+
+```go
+if strings.HasPrefix(filename, runtime.GOROOT()) {
+    return // Skip instrumentation
+}
+```
+
+**Detection**: Uses `runtime.GOROOT()` to check if file is in stdlib.
+
+### 6. Conditional Import Addition
+
+**Problem**: Adding imports when no instrumentation occurred causes "unused import" errors.
+
+**Solution**: Track whether instrumentation was actually performed.
+
+```go
+func (instr *Instrumenter) instrumentASTs(...) {
+    instrumented := false
+    
+    // Perform instrumentation...
+    if /* any instrumentation happened */ {
+        instrumented = true
+    }
+    
+    // Only add imports if we actually instrumented
+    if instrumented {
+        addImports(file, runtimeImport, unsafeImport)
+    }
+}
+```
+
+**Tracking**:
+- Check if any MemRead/MemWrite calls were added
+- Check if any goroutine transformations occurred
+- Only add imports when at least one instrumentation happened
+
 ---
 
 ## Design Decisions
@@ -560,19 +663,81 @@ type Instrumenter struct {
 // Create instrumenter with config
 func NewInstrumenter(config *Config) *Instrumenter
 
-// Instrument a file by path
+// Instrument a single file by path
 func (instr *Instrumenter) InstrumentFile(
     fset *token.FileSet, 
     filename string, 
     src interface{},
 ) (*ast.File, error)
 
-// Instrument an AST directly
+// Instrument multiple files together (for proper cross-file type checking)
+func (instr *Instrumenter) InstrumentFiles(
+    fset *token.FileSet,
+    filenames []string,
+) ([]*ast.File, error)
+
+// Instrument a single AST directly
 func (instr *Instrumenter) InstrumentAST(
     fset *token.FileSet, 
     f *ast.File,
 ) (*ast.File, error)
+
+// Instrument multiple ASTs together (for proper cross-file type checking)
+func (instr *Instrumenter) InstrumentASTs(
+    fset *token.FileSet,
+    files []*ast.File,
+) ([]*ast.File, error)
 ```
+
+**When to use each:**
+- `InstrumentFile`: For single standalone files or CLI usage
+- `InstrumentFiles`: For multi-file packages (used by `-toolexec`)
+- `InstrumentAST`: For pre-parsed single files
+- `InstrumentASTs`: For pre-parsed multi-file packages
+
+### Configuration Options
+
+**Config struct fields:**
+- `BaseRuntimeAddress`: Import path for runtime package (default: `github.com/amirkhaki/moriarty/pkg/runtime`)
+- `RuntimeAlias`: Generated alias to avoid conflicts (computed from hash)
+- `MemReadFunc`: Name of memory read hook (default: `MemRead`)
+- `MemWriteFunc`: Name of memory write hook (default: `MemWrite`)
+- `SpawnFunc`: Name of goroutine spawn wrapper (default: `Spawn`)
+- `GoroutineEnterFunc`: Name of goroutine enter hook (default: `GoroutineEnter`)
+- `GoroutineExitFunc`: Name of goroutine exit hook (default: `GoroutineExit`)
+- `ImportRewrites`: Map for rewriting import paths (advanced use)
+
+
+### CLI Usage
+
+**Standalone mode:**
+```bash
+# Instrument a single file
+moriarty input.go -o output.go
+
+# Instrument and write to stdout
+moriarty input.go
+```
+
+**Toolexec mode (integrated with go build):**
+```bash
+# Build with instrumentation
+go build -toolexec /path/to/moriarty
+
+# Build specific package
+go build -toolexec ./bin/moriarty ./mypackage
+
+# Works with other go commands
+go test -toolexec ./bin/moriarty
+go install -toolexec ./bin/moriarty
+```
+
+**How toolexec works:**
+1. Go invokes moriarty for each tool in the build chain
+2. Moriarty detects `compile` commands (ignores others like `link`, `asm`)
+3. Instruments source files before compilation
+4. Passes instrumented files to the real compiler
+5. Build output includes instrumented code
 
 ### Runtime Functions (Stubs)
 
@@ -658,6 +823,7 @@ func GoroutineExit()
    - Alias generation
    - Import handling
    - Type detection
+   - Multi-file instrumentation
 
 2. **Integration Tests** (`testdata/`)
    - Variable operations
@@ -668,6 +834,7 @@ func GoroutineExit()
 3. **Compilation Tests**
    - All instrumented code must compile
    - All instrumented code must run correctly
+   - Multi-file packages with cross-file references
 
 ### Test Coverage
 
@@ -682,6 +849,7 @@ func GoroutineExit()
 - ✅ Constants and built-ins
 - ✅ Address-of operations
 - ✅ Linked lists and complex data structures
+- ✅ Multi-file packages with cross-file type references
 
 ---
 
@@ -707,5 +875,48 @@ When adding new features:
 
 ---
 
-*Last Updated: 2025-11-27*
-*Version: 1.0*
+## Usage Examples
+
+### Basic Instrumentation
+
+```bash
+# Instrument a simple program
+moriarty examples/hello/main.go -o /tmp/instrumented.go
+
+# Run instrumented version
+go run /tmp/instrumented.go
+```
+
+### Building with Toolexec
+
+```bash
+# Build the moriarty binary first
+make build
+
+# Use it with go build
+go build -toolexec ./bin/moriarty ./examples/hello
+
+# The resulting binary includes instrumentation
+./hello
+```
+
+### Multi-file Package
+
+```bash
+# Instrument a package with multiple files
+go build -toolexec ./bin/moriarty -o myapp ./mypackage
+```
+
+### Debugging Instrumentation
+
+```bash
+# Set WORK environment variable to see intermediate files
+WORK=/tmp/moriarty go build -toolexec ./bin/moriarty
+
+# Check the instrumented source in /tmp/moriarty
+```
+
+---
+
+*Last Updated: 2025-11-28*
+*Version: 1.1*

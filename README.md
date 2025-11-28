@@ -13,7 +13,29 @@ A Go library and CLI tool for instrumenting Go source code with memory read/writ
 
 ## Quick Start
 
-### CLI Usage
+### Option 1: Use with `go build -toolexec`
+
+This is the easiest way to instrument your entire project:
+
+```bash
+# 1. Import the runtime package in your main file
+import _ "github.com/amirkhaki/moriarty/pkg/runtime"
+
+# 2. Build Moriarty
+git clone https://github.com/amirkhaki/moriarty
+cd moriarty
+go build -o bin/moriarty
+
+# 3. Build your project with instrumentation
+go build -toolexec=/path/to/moriarty/bin/moriarty
+
+# 4. Run your instrumented binary
+./your-binary
+```
+
+See [examples/toolexec](examples/toolexec) for a complete example.
+
+### Option 2: CLI for single files
 
 ```bash
 # Install
@@ -23,7 +45,7 @@ go install github.com/amirkhaki/moriarty@latest
 moriarty input.go > instrumented.go
 ```
 
-### Library Usage
+### Option 3: Library Usage
 
 ```go
 import "github.com/amirkhaki/moriarty/pkg/instrument"
@@ -107,8 +129,11 @@ moriarty/
 │   └── runtime/            # Runtime tracking functions
 │       └── runtime.go      # Stub implementations of MemRead/MemWrite
 ├── examples/
-│   └── library_usage.go    # Example code
-├── main.go                 # CLI tool
+│   ├── library_usage.go    # Library API example
+│   └── toolexec/           # Complete toolexec example
+│       ├── main.go
+│       └── README.md
+├── main.go                 # CLI tool (supports both direct and toolexec modes)
 └── testdata/               # Test files
 ```
 

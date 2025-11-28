@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"go/printer"
 	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -142,5 +144,78 @@ func TestCustomConfig(t *testing.T) {
 	instr := instrument.NewInstrumenter(config)
 	if instr == nil {
 		t.Fatal("NewInstrumenter returned nil")
+	}
+}
+
+func TestMultiFileInstrumentation(t *testing.T) {
+	// Simulate multiple files in same package that reference each other
+	file1 := `package testpkg
+
+type Counter struct {
+	value int
+}
+
+func NewCounter() *Counter {
+	return &Counter{value: 0}
+}
+
+func (c *Counter) Increment() {
+	c.value++
+}
+`
+
+	file2 := `package testpkg
+
+func UseCounter() {
+	c := NewCounter()
+	c.Increment()
+	x := c.value
+	_ = x
+}
+`
+
+	// Create temp files for testing
+	tmpDir := t.TempDir()
+	file1Path := filepath.Join(tmpDir, "counter.go")
+	file2Path := filepath.Join(tmpDir, "user.go")
+
+	if err := os.WriteFile(file1Path, []byte(file1), 0644); err != nil {
+		t.Fatalf("Failed to write file1: %v", err)
+	}
+	if err := os.WriteFile(file2Path, []byte(file2), 0644); err != nil {
+		t.Fatalf("Failed to write file2: %v", err)
+	}
+
+	// Test multi-file instrumentation
+	instr := instrument.NewInstrumenter(nil)
+	fset := token.NewFileSet()
+
+	files, err := instr.InstrumentFiles(fset, []string{file1Path, file2Path})
+	if err != nil {
+		t.Fatalf("InstrumentFiles failed: %v", err)
+	}
+
+	if len(files) != 2 {
+		t.Fatalf("Expected 2 instrumented files, got %d", len(files))
+	}
+
+	// Check that both files are instrumented
+	for i, f := range files {
+		var buf bytes.Buffer
+		if err := printer.Fprint(&buf, fset, f); err != nil {
+			t.Fatalf("Failed to print AST for file %d: %v", i, err)
+		}
+
+		result := buf.String()
+
+		// Check that runtime package is imported
+		if !strings.Contains(result, "github.com/amirkhaki/moriarty/pkg/runtime") {
+			t.Errorf("File %d: Expected runtime package import", i)
+		}
+
+		// Check that instrumentation calls are present
+		if !strings.Contains(result, "MemRead") && !strings.Contains(result, "MemWrite") {
+			t.Errorf("File %d: Expected memory instrumentation", i)
+		}
 	}
 }
