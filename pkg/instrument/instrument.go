@@ -130,7 +130,7 @@ func (instr *Instrumenter) InstrumentFiles(fset *token.FileSet, filenames []stri
 func (instr *Instrumenter) InstrumentASTs(fset *token.FileSet, files []*ast.File) ([]*ast.File, error) {
 	// Reset the any-instrumented flag for this batch
 	instr.anyInstrumented = false
-	
+
 	// Perform type checking on all files together
 	imp := instr.config.Importer
 	if imp == nil {
@@ -318,7 +318,7 @@ func (instr *Instrumenter) instrumentGoStmt(c *astutil.Cursor, stmt *ast.GoStmt)
 	for i, arg := range callExpr.Args {
 		// Add memory read instrumentation for the argument
 		instr.collectReads(arg, &blockStmts)
-		
+
 		// Generate unique parameter name
 		paramName := &ast.Ident{Name: fmt.Sprintf("__moriarty_p%d", i)}
 
@@ -409,16 +409,16 @@ func (instr *Instrumenter) lowerForStmt(c *astutil.Cursor, stmt *ast.ForStmt) {
 	if !canInsertBefore(c) {
 		return // Can't lower if we can't insert before
 	}
-	
+
 	hasInit := stmt.Init != nil
 	hasPost := stmt.Post != nil
-	
+
 	// Move post to end of body if present
 	if hasPost && stmt.Body != nil {
 		stmt.Body.List = append(stmt.Body.List, stmt.Post)
 		stmt.Post = nil
 	}
-	
+
 	// Wrap in block if we have init
 	if hasInit {
 		block := &ast.BlockStmt{
@@ -448,14 +448,14 @@ func (instr *Instrumenter) instrumentForStmt(c *astutil.Cursor, stmt *ast.ForStm
 	if stmt.Cond != nil {
 		var readStmts []ast.Stmt
 		instr.collectReads(stmt.Cond, &readStmts)
-		
+
 		if canInsertBefore(c) {
 			// Add reads before the loop (for first condition check)
 			for _, s := range readStmts {
 				c.InsertBefore(s)
 			}
 		}
-		
+
 		// Also append to body (AFTER body and post, BEFORE next iteration's condition check)
 		if stmt.Body != nil && len(readStmts) > 0 {
 			stmt.Body.List = append(stmt.Body.List, readStmts...)
@@ -468,7 +468,7 @@ func (instr *Instrumenter) instrumentSwitchStmt(c *astutil.Cursor, stmt *ast.Swi
 	if stmt.Tag != nil && canInsertBefore(c) {
 		var readStmts []ast.Stmt
 		instr.collectReads(stmt.Tag, &readStmts)
-		
+
 		// Insert reads BEFORE the switch statement
 		for _, s := range readStmts {
 			c.InsertBefore(s)

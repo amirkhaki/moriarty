@@ -2,62 +2,97 @@
 // for race detection instrumentation.
 package runtime
 
-import "unsafe"
+import (
+	"github.com/amirkhaki/moriarty/pkg/goid"
+	"sync"
+	"unsafe"
+)
+
+type val struct{}
+type kind uint64
+
+const (
+	_ kind = 1 << iota
+	kRead
+	kWrite
+	kSpawn
+	kGoEnter
+	kGoExit
+)
+
+type event struct {
+	id uint64
+	k  kind
+}
+
+type scheduler struct {
+	channels map[uint64]chan val
+	events   chan event
+	mu       sync.Mutex
+}
+
+func (s *scheduler) register(id uint64, ch chan val) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.channels[id] = ch
+}
+
+func (s *scheduler) run() {
+	for e := range s.events {
+		switch e.k {
+		case kRead:
+		case kWrite:
+		case kGoEnter:
+		case kGoExit:
+		}
+	}
+}
+
+var sched scheduler
+
+func init() {
+	sched.channels = make(map[uint64]chan val)
+	sched.events = make(chan event)
+	go sched.run()
+}
 
 // MemRead is called before a memory read operation.
 // addr points to the memory location being read.
 func MemRead(addr unsafe.Pointer) {
-	// Stub function for memory read instrumentation
-	// To be implemented by race detector runtime
-	//
-	// Example implementation might:
-	// - Record the read in a thread-local shadow memory
-	// - Check for conflicting writes from other goroutines
-	// - Report race if detected
-	println("mem read")
+	id := goid.Get()
+	sched.events <- event{id, kRead}
+	<-sched.channels[id]
 }
 
 // MemWrite is called before a memory write operation.
 // addr points to the memory location being written.
 func MemWrite(addr unsafe.Pointer) {
-	// Stub function for memory write instrumentation
-	// To be implemented by race detector runtime
-	//
-	// Example implementation might:
-	// - Record the write in a thread-local shadow memory
-	// - Check for conflicting reads/writes from other goroutines
-	// - Report race if detected
-	println("mem write")
+	id := goid.Get()
+	sched.events <- event{id, kWrite}
+	<-sched.channels[id]
 }
 
 // Spawn launches a new goroutine with the given function.
 // This wraps the standard go statement to enable tracking.
 func Spawn(f func()) {
-	// Stub function for goroutine spawn instrumentation
-	// To be implemented by race detector runtime
+	id := goid.Get()
+	sched.events <- event{id, kSpawn}
+	<-sched.channels[id]
 	go f()
 }
 
 // GoroutineEnter is called at the start of each instrumented goroutine.
 func GoroutineEnter() {
-	// Stub function for goroutine entry hook
-	// To be implemented by race detector runtime
-	//
-	// Example implementation might:
-	// - Allocate thread-local storage for this goroutine
-	// - Register the goroutine in a global tracker
-	// - Set up happens-before relationships
-	println("goroutine enter")
+	id := goid.Get()
+	ch := make(chan val)
+	sched.register(id, ch)
+	sched.events <- event{id, kGoEnter}
+	<-ch
 }
 
 // GoroutineExit is called at the end of each instrumented goroutine.
 func GoroutineExit() {
-	// Stub function for goroutine exit hook
-	// To be implemented by race detector runtime
-	//
-	// Example implementation might:
-	// - Clean up thread-local storage
-	// - Update happens-before relationships
-	// - Flush pending race reports
-	println("goroutine exit")
+	id := goid.Get()
+	sched.events <- event{id, kGoExit}
+	<-sched.channels[id]
 }

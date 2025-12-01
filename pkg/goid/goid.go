@@ -1,24 +1,24 @@
 package goid
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"runtime"
-	"bytes"
 	"strconv"
-	"errors"
 )
 
 // extracted from net/http/h2_bundle.go
 
 // Return the first number n such that n*base >= 1<<64.
-func http2cutoff64(base int) uint64 {
+func cutoff64(base int) uint64 {
 	if base < 2 {
 		return 0
 	}
 	return (1<<64-1)/uint64(base) + 1
 }
 
-func http2parseUintBytes(s []byte, base int, bitSize int) (n uint64, err error) {
+func parseUintBytes(s []byte, base int, bitSize int) (n uint64, err error) {
 	var cutoff, maxVal uint64
 
 	if bitSize == 0 {
@@ -56,7 +56,7 @@ func http2parseUintBytes(s []byte, base int, bitSize int) (n uint64, err error) 
 	}
 
 	n = 0
-	cutoff = http2cutoff64(base)
+	cutoff = cutoff64(base)
 	maxVal = 1<<uint(bitSize) - 1
 
 	for i := 0; i < len(s); i++ {
@@ -103,18 +103,20 @@ func http2parseUintBytes(s []byte, base int, bitSize int) (n uint64, err error) 
 Error:
 	return n, &strconv.NumError{Func: "ParseUint", Num: string(s0), Err: err}
 }
-var http2goroutineSpace = []byte("goroutine ")
-func http2curGoroutineID() uint64 {
+
+var goroutineSpace = []byte("goroutine ")
+
+func curGoroutineID() uint64 {
 	b := make([]byte, 64)
 	b = b[:runtime.Stack(b, false)]
 	// Parse the 4707 out of "goroutine 4707 ["
-	b = bytes.TrimPrefix(b, http2goroutineSpace)
+	b = bytes.TrimPrefix(b, goroutineSpace)
 	i := bytes.IndexByte(b, ' ')
 	if i < 0 {
 		panic(fmt.Sprintf("No space found in %q", b))
 	}
 	b = b[:i]
-	n, err := http2parseUintBytes(b, 10, 64)
+	n, err := parseUintBytes(b, 10, 64)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to parse goroutine ID out of %q: %v", b, err))
 	}
@@ -122,5 +124,5 @@ func http2curGoroutineID() uint64 {
 }
 
 func Get() uint64 {
-	return http2curGoroutineID()
+	return curGoroutineID()
 }
