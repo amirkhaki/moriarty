@@ -42,6 +42,7 @@ func (s *scheduler) run() {
 		switch e.k {
 		case kRead:
 		case kWrite:
+		case kSpawn:
 		case kGoEnter:
 		case kGoExit:
 		}
