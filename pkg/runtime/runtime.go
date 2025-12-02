@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"github.com/amirkhaki/moriarty/pkg/goid"
+	"log"
 	"sync"
 	"unsafe"
 )
@@ -37,14 +38,27 @@ func (s *scheduler) register(id uint64, ch chan val) {
 	s.channels[id] = ch
 }
 
+func (s *scheduler) unblock(e event) {
+	s.channels[e.id] <- val{}
+}
 func (s *scheduler) run() {
 	for e := range s.events {
 		switch e.k {
 		case kRead:
+			log.Println("reading from goroutine", e.id)
+			s.unblock(e)
 		case kWrite:
+			log.Println("writing from goroutine", e.id)
+			s.unblock(e)
 		case kSpawn:
+			log.Println("spawning from goroutine", e.id)
+			s.unblock(e)
 		case kGoEnter:
+			log.Println("entering goroutine", e.id)
+			s.unblock(e)
 		case kGoExit:
+			log.Println("exiting goroutine", e.id)
+			s.unblock(e)
 		}
 	}
 }
@@ -96,4 +110,5 @@ func GoroutineExit() {
 	id := goid.Get()
 	sched.events <- event{id, kGoExit}
 	<-sched.channels[id]
+	goid.Delete()
 }

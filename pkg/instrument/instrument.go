@@ -237,6 +237,9 @@ func (instr *Instrumenter) instrumentSingleAST(fset *token.FileSet, f *ast.File)
 		return true
 	})
 
+	// Third pass: instrument main function if this is the main package
+	instr.instrumentMainFunction(f)
+
 	// Only add imports if instrumentation was actually added
 	if instr.instrumented {
 		instr.anyInstrumented = true
@@ -827,4 +830,53 @@ func isBuiltin(name string) bool {
 		"true": true, "false": true, "nil": true, "iota": true,
 	}
 	return builtins[name]
+}
+
+// instrumentMainFunction adds GoroutineEnter/Exit hooks to main() in main package
+func (instr *Instrumenter) instrumentMainFunction(f *ast.File) {
+	// Only instrument if this is the main package
+	if f.Name.Name != "main" {
+		return
+	}
+
+	// Find the main function
+	for _, decl := range f.Decls {
+		funcDecl, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+
+		// Check if this is the main function
+		if funcDecl.Name.Name == "main" && funcDecl.Recv == nil {
+			// Add GoroutineEnter at the beginning
+			enterCall := &ast.ExprStmt{
+				X: &ast.CallExpr{
+					Fun: &ast.SelectorExpr{
+						X:   &ast.Ident{Name: instr.config.RuntimeAlias},
+						Sel: &ast.Ident{Name: instr.config.GoroutineEnterFunc},
+					},
+				},
+			}
+
+			// Add GoroutineExit at the end
+			exitCall := &ast.ExprStmt{
+				X: &ast.CallExpr{
+					Fun: &ast.SelectorExpr{
+						X:   &ast.Ident{Name: instr.config.RuntimeAlias},
+						Sel: &ast.Ident{Name: instr.config.GoroutineExitFunc},
+					},
+				},
+			}
+
+			// Prepend enter call to the body
+			if funcDecl.Body != nil {
+				funcDecl.Body.List = append([]ast.Stmt{enterCall}, funcDecl.Body.List...)
+				// Append exit call to the body
+				funcDecl.Body.List = append(funcDecl.Body.List, exitCall)
+				instr.instrumented = true
+			}
+
+			break
+		}
+	}
 }

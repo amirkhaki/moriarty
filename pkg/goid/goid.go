@@ -6,7 +6,12 @@ import (
 	"fmt"
 	"runtime"
 	"strconv"
+	"sync"
+	"sync/atomic"
 )
+
+var counter atomic.Uint64
+var gidMap sync.Map
 
 // extracted from net/http/h2_bundle.go
 
@@ -123,6 +128,27 @@ func curGoroutineID() uint64 {
 	return n
 }
 
+func create() uint64 {
+	val := counter.Add(1)
+	cid := curGoroutineID()
+	gidMap.Store(cid, val)
+	return val
+}
+
 func Get() uint64 {
-	return curGoroutineID()
+	cid := curGoroutineID()
+	v, ok := gidMap.Load(cid)
+	if !ok {
+		return create()
+	}
+	vi, ok := v.(uint64)
+	if !ok {
+		panic("v is not uint64")
+	}
+	return vi
+}
+
+func Delete() {
+	cid := curGoroutineID()
+	gidMap.Delete(cid)
 }
