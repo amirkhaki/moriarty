@@ -1,4 +1,4 @@
-package main
+package cmd
 
 import (
 	"fmt"
@@ -13,107 +13,24 @@ import (
 	"strings"
 
 	"github.com/amirkhaki/moriarty/pkg/instrument"
+	"github.com/spf13/cobra"
 )
 
-func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: moriarty <source.go> or use with go build -toolexec=moriarty")
-		return
-	}
-
-	// Check if we're being used as a toolexec wrapper
-	// In toolexec mode, args[1] is the tool path (e.g., /usr/lib/go/pkg/tool/linux_amd64/compile)
-	// In direct mode, args[1] is a source file (e.g., example.go)
-	if len(os.Args) > 1 && (strings.Contains(os.Args[1], string(filepath.Separator)) || strings.HasSuffix(os.Args[1], "compile") || strings.HasSuffix(os.Args[1], "link") || strings.HasSuffix(os.Args[1], "asm") || strings.HasSuffix(os.Args[1], "cgo")) {
-		handleToolExec()
-		return
-	}
-
-	// Direct instrumentation mode
-	filepath := os.Args[1]
-	instrumentAndPrint(filepath, os.Stdout)
-}
-
-// handleLinkCommand intercepts link commands and adds our runtime package to importcfg
-func handleLinkCommand(tool string, args []string) {
-	// Find importcfg in arguments
-	var importcfgPath string
-	for i, arg := range args {
-		if arg == "-importcfg" && i+1 < len(args) {
-			// Expand environment variables in the path
-			importcfgPath = os.ExpandEnv(args[i+1])
-			break
-		}
-	}
-
-	if importcfgPath == "" {
-		// No importcfg, just run the link command
-		cmd := exec.Command(tool, args...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		cmd.Stdin = os.Stdin
-		err := cmd.Run()
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				os.Exit(exitErr.ExitCode())
-			}
-			os.Exit(1)
-		}
-		return
-	}
-
-	// Create a temp directory for our runtime package
-	tempDir, err := os.MkdirTemp("", "moriarty_link_*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "moriarty: warning: failed to create temp dir: %v\n", err)
-		// Continue without modification
-		cmd := exec.Command(tool, args...)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		cmd.Stdin = os.Stdin
-		err := cmd.Run()
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				os.Exit(exitErr.ExitCode())
-			}
-			os.Exit(1)
-		}
-		return
-	}
-	defer os.RemoveAll(tempDir)
-
-	// Modify the importcfg to include our runtime package
-	newImportcfgPath, err := modifyLinkImportCfg(importcfgPath, tempDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "moriarty: warning: failed to modify link importcfg: %v\n", err)
-	} else {
-		// Replace the importcfg path in args
-		for i, arg := range args {
-			if arg == "-importcfg" && i+1 < len(args) {
-				args[i+1] = newImportcfgPath
-				break
-			}
-		}
-	}
-
-	// Run the link command
-	cmd := exec.Command(tool, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-	if err = cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		}
-		os.Exit(1)
-	}
+// toolexecCmd represents the toolexec command
+var toolexecCmd = &cobra.Command{
+	Use:                "toolexec",
+	Short:              "go build -toolexec 'moriarty toolexec'",
+	Long:               ``,
+	DisableFlagParsing: true,
+	Args:               cobra.MinimumNArgs(1),
+	Run:                handleToolExec,
 }
 
 // handleToolExec intercepts go tool commands when used with -toolexec
-func handleToolExec() {
+func handleToolExec(cmd *cobra.Command, args []string) {
 	// Args: [moriarty, /path/to/compile, compile-args...]
-	tool := os.Args[1]
-	args := os.Args[2:]
+	tool := args[0]
+	args = args[1:]
 
 	// Handle link command separately
 	if strings.HasSuffix(tool, "link") {
@@ -205,7 +122,7 @@ func handleToolExec() {
 			customImporter = nil
 		}
 	}
-	
+
 	instrumentedFiles, wasInstrumented, err := instrumentFilesToDir(goFiles, tempDir, customImporter)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "moriarty: failed to instrument: %v\n", err)
@@ -245,11 +162,11 @@ func handleToolExec() {
 	}
 
 	// Run the original compile command with instrumented files
-	cmd := exec.Command(tool, newArgs...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-	err = cmd.Run()
+	command := exec.Command(tool, newArgs...)
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	command.Stdin = os.Stdin
+	err = command.Run()
 
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -320,7 +237,7 @@ func modifyImportCfg(originalPath, tempDir string) (string, error) {
 	// Compile the runtime package directly
 	runtimePkgPath := "github.com/amirkhaki/moriarty/pkg/runtime"
 	archivePath := filepath.Join(tempDir, "runtime.a")
-	
+
 	// Find moriarty project root (where this binary is from)
 	// Assume it's in bin/ subdirectory
 	exePath, err := os.Executable()
@@ -329,7 +246,7 @@ func modifyImportCfg(originalPath, tempDir string) (string, error) {
 	}
 	projectRoot := filepath.Dir(filepath.Dir(exePath))
 	runtimeSrcDir := filepath.Join(projectRoot, "pkg", "runtime")
-	
+
 	// Get go tool compile path
 	compileCmd := exec.Command("go", "env", "GOTOOLDIR")
 	toolDir, err := compileCmd.Output()
@@ -337,18 +254,18 @@ func modifyImportCfg(originalPath, tempDir string) (string, error) {
 		return "", fmt.Errorf("failed to get GOTOOLDIR: %w", err)
 	}
 	compilePath := filepath.Join(strings.TrimSpace(string(toolDir)), "compile")
-	
+
 	// Compile runtime.go to archive
 	runtimeSrc := filepath.Join(runtimeSrcDir, "runtime.go")
 	cmd := exec.Command(compilePath, "-o", archivePath, "-p", runtimePkgPath, runtimeSrc)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("failed to compile runtime package: %w\nOutput: %s", err, string(output))
 	}
-	
+
 	// Create new importcfg with our package added
 	newContent := string(content)
 	runtimeEntry := fmt.Sprintf("packagefile %s=%s\n", runtimePkgPath, archivePath)
-	
+
 	// Add it at the end
 	newContent = newContent + runtimeEntry
 
@@ -372,7 +289,7 @@ func modifyLinkImportCfg(originalPath, tempDir string) (string, error) {
 	// Find the runtime.a file we compiled earlier
 	runtimePkgPath := "github.com/amirkhaki/moriarty/pkg/runtime"
 	archivePath := filepath.Join(tempDir, "runtime.a")
-	
+
 	// Check if it exists (it should have been created during compile step)
 	if _, err := os.Stat(archivePath); os.IsNotExist(err) {
 		// Compile it now if it doesn't exist
@@ -382,7 +299,7 @@ func modifyLinkImportCfg(originalPath, tempDir string) (string, error) {
 		}
 		projectRoot := filepath.Dir(filepath.Dir(exePath))
 		runtimeSrcDir := filepath.Join(projectRoot, "pkg", "runtime")
-		
+
 		// Get go tool compile path
 		compileCmd := exec.Command("go", "env", "GOTOOLDIR")
 		toolDir, err := compileCmd.Output()
@@ -390,7 +307,7 @@ func modifyLinkImportCfg(originalPath, tempDir string) (string, error) {
 			return "", fmt.Errorf("failed to get GOTOOLDIR: %w", err)
 		}
 		compilePath := filepath.Join(strings.TrimSpace(string(toolDir)), "compile")
-		
+
 		// Compile runtime.go to archive
 		runtimeSrc := filepath.Join(runtimeSrcDir, "runtime.go")
 		cmd := exec.Command(compilePath, "-o", archivePath, "-p", runtimePkgPath, runtimeSrc)
@@ -398,11 +315,11 @@ func modifyLinkImportCfg(originalPath, tempDir string) (string, error) {
 			return "", fmt.Errorf("failed to compile runtime package: %w\nOutput: %s", err, string(output))
 		}
 	}
-	
+
 	// Create new importcfg with our package added
 	newContent := string(content)
 	runtimeEntry := fmt.Sprintf("packagefile %s=%s\n", runtimePkgPath, archivePath)
-	
+
 	// Add it at the end
 	newContent = newContent + runtimeEntry
 
@@ -451,16 +368,81 @@ func instrumentFilesToDir(goFiles []string, targetDir string, customImporter typ
 
 	return outputFiles, instr.WasInstrumented(), nil
 }
+func init() {
+	rootCmd.AddCommand(toolexecCmd)
+}
 
-// instrumentAndPrint instruments a source file and writes to the given writer
-func instrumentAndPrint(filepath string, w io.Writer) error {
-	instr := instrument.NewInstrumenter(nil)
-	fset := token.NewFileSet()
-
-	f, err := instr.InstrumentFile(fset, filepath, nil)
-	if err != nil {
-		return err
+// handleLinkCommand intercepts link commands and adds our runtime package to importcfg
+func handleLinkCommand(tool string, args []string) {
+	// Find importcfg in arguments
+	var importcfgPath string
+	for i, arg := range args {
+		if arg == "-importcfg" && i+1 < len(args) {
+			// Expand environment variables in the path
+			importcfgPath = os.ExpandEnv(args[i+1])
+			break
+		}
 	}
 
-	return printer.Fprint(w, fset, f)
+	if importcfgPath == "" {
+		// No importcfg, just run the link command
+		cmd := exec.Command(tool, args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		err := cmd.Run()
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				os.Exit(exitErr.ExitCode())
+			}
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Create a temp directory for our runtime package
+	tempDir, err := os.MkdirTemp("", "moriarty_link_*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "moriarty: warning: failed to create temp dir: %v\n", err)
+		// Continue without modification
+		cmd := exec.Command(tool, args...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+		err := cmd.Run()
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				os.Exit(exitErr.ExitCode())
+			}
+			os.Exit(1)
+		}
+		return
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Modify the importcfg to include our runtime package
+	newImportcfgPath, err := modifyLinkImportCfg(importcfgPath, tempDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "moriarty: warning: failed to modify link importcfg: %v\n", err)
+	} else {
+		// Replace the importcfg path in args
+		for i, arg := range args {
+			if arg == "-importcfg" && i+1 < len(args) {
+				args[i+1] = newImportcfgPath
+				break
+			}
+		}
+	}
+
+	// Run the link command
+	cmd := exec.Command(tool, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	if err = cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		os.Exit(1)
+	}
 }
