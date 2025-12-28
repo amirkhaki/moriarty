@@ -40,6 +40,9 @@ type Config struct {
 	// GoroutineExitFunc is the name of the goroutine exit hook
 	GoroutineExitFunc string
 
+	InitializeFunc string
+	FinalizeFunc string
+
 	// Importer is used for resolving imports during type checking
 	// If nil, importer.Default() is used
 	Importer types.Importer
@@ -56,6 +59,8 @@ func DefaultConfig() *Config {
 		SpawnFunc:          "Spawn",
 		GoroutineEnterFunc: "GoroutineEnter",
 		GoroutineExitFunc:  "GoroutineExit",
+		InitializeFunc:     "Initialize",
+		FinalizeFunc:       "Finalize",
 		ImportRewrites:     map[string]string{},
 	}
 }
@@ -867,12 +872,28 @@ func (instr *Instrumenter) instrumentMainFunction(f *ast.File) {
 					},
 				},
 			}
+			initializeCall := &ast.ExprStmt{
+				X: &ast.CallExpr{
+					Fun: &ast.SelectorExpr{
+						X:   &ast.Ident{Name: instr.config.RuntimeAlias},
+						Sel: &ast.Ident{Name: instr.config.InitializeFunc},
+					},
+				},
+			}
+			finalizeCall := &ast.ExprStmt{
+				X: &ast.CallExpr{
+					Fun: &ast.SelectorExpr{
+						X:   &ast.Ident{Name: instr.config.RuntimeAlias},
+						Sel: &ast.Ident{Name: instr.config.FinalizeFunc},
+					},
+				},
+			}
 
 			// Prepend enter call to the body
 			if funcDecl.Body != nil {
-				funcDecl.Body.List = append([]ast.Stmt{enterCall}, funcDecl.Body.List...)
+				funcDecl.Body.List = append([]ast.Stmt{initializeCall, enterCall}, funcDecl.Body.List...)
 				// Append exit call to the body
-				funcDecl.Body.List = append(funcDecl.Body.List, exitCall)
+				funcDecl.Body.List = append(funcDecl.Body.List, exitCall, finalizeCall)
 				instr.instrumented = true
 			}
 

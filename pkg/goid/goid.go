@@ -135,6 +135,9 @@ func create() uint64 {
 	return val
 }
 
+func Gen() uint64 {
+	return counter.Add(1)
+}
 func Get() uint64 {
 	cid := curGoroutineID()
 	v, ok := gidMap.Load(cid)
@@ -146,6 +149,11 @@ func Get() uint64 {
 		panic("v is not uint64")
 	}
 	return vi
+}
+
+func Assign(val uint64) {
+	cid := curGoroutineID()
+	gidMap.Store(cid, val)
 }
 
 func Delete() {
