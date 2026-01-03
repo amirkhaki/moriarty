@@ -43,7 +43,8 @@ func NewRandomStrategy(traceFile string, seed int64) (*RandomStrategy, error) {
 }
 
 // Yield blocks until this goroutine is randomly selected to proceed.
-func (s *RandomStrategy) Yield(e Event) {
+// OnEvent blocks until this goroutine is randomly selected to proceed.
+func (s *RandomStrategy) OnEvent(e Event) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -105,10 +106,13 @@ func (s *RandomStrategy) Yield(e Event) {
 	s.pending[e.GoID] = s.pending[e.GoID][1:]
 	s.waiting[e.GoID] = false
 }
+func (s *RandomStrategy) RegisterGoroutine(goID uint64) {}
+func (s *RandomStrategy) UnregisterGoroutine(goID uint64) {}
 
 // OnFinalize does nothing.
 func (s *RandomStrategy) OnFinalize() {}
 
+func (s *RandomStrategy) Wait(e Event) {}
 // ReplayTrace reloads and re-randomizes.
 func (s *RandomStrategy) ReplayTrace() error {
 	trace, err := LoadTrace(s.traceFile)

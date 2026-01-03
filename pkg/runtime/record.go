@@ -19,13 +19,16 @@ func NewRecordStrategy(traceFile string) *RecordStrategy {
 	return &RecordStrategy{traceFile: traceFile}
 }
 
-// Yield records the event without blocking.
-func (s *RecordStrategy) Yield(e Event) {
+func (s *RecordStrategy) RegisterGoroutine(goID uint64) {}
+func (s *RecordStrategy) UnregisterGoroutine(goID uint64) {}
+// OnEvent records the event without blocking.
+func (s *RecordStrategy) OnEvent(e Event) {
 	s.mu.Lock()
 	s.trace = append(s.trace, e)
 	s.mu.Unlock()
 }
 
+func (s *RecordStrategy) Wait(e Event) {}
 // OnFinalize saves the recorded trace to file.
 func (s *RecordStrategy) OnFinalize() {
 	if s.traceFile == "" {
