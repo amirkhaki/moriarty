@@ -1,35 +1,35 @@
 package runtime
 
-import "sync"
-
 // scheduler coordinates goroutines and delegates to a strategy.
 type scheduler struct {
 	strategy Strategy
-
-	// Track registered goroutines (for future use by advanced strategies)
-	registered   map[uint64]bool
-	registeredMu sync.Mutex
+	events   chan Event
 }
 
+
 func newScheduler(strategy Strategy) *scheduler {
-	return &scheduler{
+	s := &scheduler{
 		strategy:   strategy,
-		registered: make(map[uint64]bool),
+		events:     make(chan Event),
 	}
+	go s.run()
+	return s
 }
 
 func (s *scheduler) registerGoroutine(goID uint64) {
-	s.registeredMu.Lock()
-	s.registered[goID] = true
-	s.registeredMu.Unlock()
+	s.strategy.RegisterGoroutine(goID)
 }
 
+func (s *scheduler) run() {
+	for e := range s.events {
+		s.strategy.OnEvent(e)
+	}
+}
 func (s *scheduler) unregisterGoroutine(goID uint64) {
-	s.registeredMu.Lock()
-	delete(s.registered, goID)
-	s.registeredMu.Unlock()
+	s.strategy.UnregisterGoroutine(goID)
 }
 
 func (s *scheduler) yield(e Event) {
-	s.strategy.Yield(e)
+	s.events <- e
+	s.strategy.Wait(e)
 }

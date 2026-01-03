@@ -9,8 +9,11 @@ import (
 type ReplayStrategy struct {
 	trace     []Event
 	idx       int
-	cond      *sync.Cond
 	traceFile string
+	registered   map[uint64]chan struct{}
+	registeredMu sync.Mutex
+	backLog map[uint64]Event
+	i uint64
 }
 
 // NewReplayStrategy creates a replay strategy from a trace file.
@@ -19,32 +22,66 @@ func NewReplayStrategy(traceFile string) (*ReplayStrategy, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &ReplayStrategy{trace: trace, traceFile: traceFile}
-	s.cond = sync.NewCond(&sync.Mutex{})
+	s := &ReplayStrategy{
+		trace: trace,
+		traceFile: traceFile,
+		registered: make(map[uint64]chan struct{}),
+		backLog: make(map[uint64]Event),
+	}
 	return s, nil
 }
 
-// Yield blocks until this goroutine's event matches the next expected event.
-func (s *ReplayStrategy) Yield(e Event) {
-	s.cond.L.Lock()
-	defer s.cond.L.Unlock()
+func (s *ReplayStrategy) RegisterGoroutine(goID uint64) {
+	s.registeredMu.Lock()
+	s.registered[goID] = make(chan struct{})
+	s.registeredMu.Unlock()
+}
+func (s *ReplayStrategy) UnregisterGoroutine(goID uint64) {
+	s.registeredMu.Lock()
+	delete(s.registered, goID)
+	s.registeredMu.Unlock()
+}
+// Wait blocks until this goroutine's event matches the next expected event.
+func (s *ReplayStrategy) Wait(e Event) {
+	s.registeredMu.Lock()
+	var blockChan = s.registered[e.GoID]
+	s.registeredMu.Unlock()
+	<-blockChan
+}
+func (s *ReplayStrategy) unblock(e Event) {
+	s.registeredMu.Lock()
+	var blockChan = s.registered[e.GoID]
+	s.registeredMu.Unlock()
+	blockChan <- struct{}{}
+}
+// OnEvent processes the event
+func (s *ReplayStrategy) OnEvent(e Event) {
+	if s.idx >= len(s.trace) {
+		s.unblock(e)
+		return
+	}
 
-	for {
-		if s.idx >= len(s.trace) {
-			// Trace exhausted - allow execution to continue
-			return
-		}
-
+	s.backLog[s.i] = e
+	s.i++
+	
+	// Process as many events from backlog as possible in trace order
+	for s.idx < len(s.trace) {
 		expected := s.trace[s.idx]
-		if expected.GoID == e.GoID && expected.Kind == e.Kind {
-			// It's our turn!
-			s.idx++
-			s.cond.Broadcast()
-			return
+		found := false
+		for k, v := range s.backLog {
+			if expected.GoID == v.GoID && expected.Kind == v.Kind {
+				// It's this goroutine's turn!
+				s.idx++
+				s.unblock(v)
+				delete(s.backLog, k)
+				found = true
+				break
+			}
 		}
-
-		// Not our turn - wait
-		s.cond.Wait()
+		if !found {
+			// No matching event in backlog yet, wait for more events
+			break
+		}
 	}
 }
 
@@ -57,9 +94,7 @@ func (s *ReplayStrategy) ReplayTrace() error {
 	if err != nil {
 		return err
 	}
-	s.cond.L.Lock()
 	s.trace = trace
 	s.idx = 0
-	s.cond.L.Unlock()
 	return nil
 }
